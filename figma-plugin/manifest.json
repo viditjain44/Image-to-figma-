@@ -1,0 +1,14 @@
+{
+  "name": "Image to Figma",
+  "id": "img-to-figma-local",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["figma"],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": ["none"],
+    "devAllowedDomains": ["http://localhost:8001", "http://127.0.0.1:8001"],
+    "reasoning": "Talks to the img-to-figma server running on this Mac."
+  }
+}

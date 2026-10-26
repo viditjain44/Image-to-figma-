@@ -1,0 +1,44 @@
+{
+  // Run with ⌘⇧P → "Tasks: Run Task" → "Start app" (or ⌘⇧B). Each server gets its own terminal.
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "API server",
+      "type": "shell",
+      "command": "uv run img-to-figma serve",
+      "options": { "cwd": "${workspaceFolder}" },
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": { "regexp": "^__never__$" },
+        "background": { "activesBegin": true, "beginsPattern": "Started server process", "endsPattern": "Uvicorn running on" }
+      },
+      "presentation": { "panel": "dedicated", "group": "servers" }
+    },
+    {
+      "label": "Web editor",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": { "cwd": "${workspaceFolder}/web" },
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": { "regexp": "^__never__$" },
+        "background": { "activesBegin": true, "beginsPattern": "VITE", "endsPattern": "Local:" }
+      },
+      "presentation": { "panel": "dedicated", "group": "servers" }
+    },
+    {
+      "label": "Start app",
+      "dependsOn": ["API server", "Web editor"],
+      "dependsOrder": "parallel",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "Install / update dependencies",
+      "type": "shell",
+      "command": "uv sync && (cd web && npm install)",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    }
+  ]
+}

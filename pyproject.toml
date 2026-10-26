@@ -1,0 +1,27 @@
+[project]
+name = "img-to-figma"
+version = "0.1.0"
+description = "Turn an ad creative or screenshot into editable Figma layers, fully local."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "numpy>=2.0",
+    "ollama>=0.6",
+    "onnxruntime>=1.20",
+    "opencv-python-headless>=4.10",
+    "pillow>=11.0",
+    "pydantic>=2.9",
+    "pyobjc-framework-Vision>=11.0",
+    "python-multipart>=0.0.20",
+    "rembg>=2.0.60",
+    "torch>=2.5",
+    "typer>=0.15",
+    "uvicorn[standard]>=0.32",
+]
+
+[project.scripts]
+img-to-figma = "img_to_figma:main"
+
+[build-system]
+requires = ["uv_build>=0.8,<0.14.0"]
+build-backend = "uv_build"

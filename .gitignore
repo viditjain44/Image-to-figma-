@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[oc]
+*.egg-info
+.venv
+
+# Node
+web/node_modules/
+web/dist/
+
+# Generated / large
+outputs/
+models/
+.DS_Store
+web/*.tsbuildinfo
