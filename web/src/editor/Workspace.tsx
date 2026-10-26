@@ -200,6 +200,17 @@ export default function Workspace(p: Props) {
     return l && canvasPickable(l) ? l : null;
   };
 
+  /** The layer under a screen point. Needed after a pointer-down: the viewport then holds the pointer
+   *  capture, so later events (click, double-click) are aimed at the viewport, not at the layer. */
+  const layerAtPoint = (x: number, y: number): Layer | null => {
+    for (const el of document.elementsFromPoint(x, y)) {
+      const l = layerAt(el);
+      if (l) return l;
+      if ((el as HTMLElement).classList?.contains("viewport")) break;
+    }
+    return null;
+  };
+
   const onPointerDown = (e: PointerEvent) => {
     if (e.button === 2) return;
     const w = toWorld(e);
@@ -270,7 +281,9 @@ export default function Workspace(p: Props) {
       setHover(layerAt(e.target)?.id ?? null);
       return;
     }
-    if (e.buttons === 0) { // the release was missed (off-window, interrupted click): never keep dragging
+    // The release was missed (off-window, interrupted click): never keep dragging. While the viewport
+    // holds the pointer capture the release always comes back here, so only check when it lost it.
+    if (e.buttons === 0 && !vp.current?.hasPointerCapture(e.pointerId)) {
       onPointerUp();
       return;
     }
@@ -340,7 +353,7 @@ export default function Workspace(p: Props) {
   }, []);
 
   const onDoubleClick = (e: MouseEvent) => {
-    const hit = layerAt(e.target);
+    const hit = layerAtPoint(e.clientX, e.clientY);
     if (hit && (hit.type === "text" || hit.type === "button" || hit.type === "pill")) {
       dispatch({ type: "select", ids: [hit.id] });
       setEditingId(hit.id);

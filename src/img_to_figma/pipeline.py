@@ -42,6 +42,49 @@ def _load(path: Path) -> np.ndarray:
     return np.array(im)
 
 
+def _print_on_subject(img: np.ndarray, rgba: np.ndarray, box, editable: list, blocks: list) -> int:
+    """Text lying on the opaque cut-out and stacked with packaging print already kept in the picture
+    ("Shampoo" under "Bond Retain Hydrating") is print on the product: it has to move with it. Put its original pixels back on the cut-out and drop it from the text layers. Other text over
+    the subject (a headline or disclaimer across a model) stays editable."""
+    if not editable:
+        return 0
+
+    def on_cutout(b) -> tuple[int, int, int, int] | None:
+        x0, y0 = b.box.x - box.x, b.box.y - box.y
+        x1, y1 = x0 + b.box.w, y0 + b.box.h
+        if x0 < 0 or y0 < 0 or x1 > rgba.shape[1] or y1 > rgba.shape[0]:
+            return None
+        return (x0, y0, x1, y1) if (rgba[y0:y1, x0:x1, 3] > 200).mean() >= 0.8 else None
+
+    def stacked(b, k) -> bool:  # same column of a pack, right above or below
+        reach = b.font_size * 1.5
+        return (min(k.box.x2, b.box.x2) > max(k.box.x, b.box.x)
+                and abs(k.box.cy - b.box.cy) < (k.box.h + b.box.h) / 2 + reach)
+
+    n, changed = 0, True
+    while changed:  # a label under a label under packaging print
+        changed = False
+        for b in editable:
+            if b.keep_in_background:
+                continue
+            spot = on_cutout(b)
+            if spot is None:
+                continue
+            printed = [k for k in blocks if k.keep_in_background and k is not b]
+            if not any(stacked(b, k) for k in printed):
+                continue
+            x0, y0, x1, y1 = spot
+            pad = max(2, int(b.font_size * 0.4))
+            px0, py0 = max(0, x0 - pad), max(0, y0 - pad)
+            px1, py1 = min(rgba.shape[1], x1 + pad), min(rgba.shape[0], y1 + pad)
+            solid = rgba[py0:py1, px0:px1, 3] > 0
+            region = rgba[py0:py1, px0:px1, :3]
+            region[solid] = img[box.y + py0:box.y + py1, box.x + px0:box.x + px1][solid]
+            b.keep_in_background = changed = True
+            n += 1
+    return n
+
+
 def run(image_path: Path, options: Options | None = None, job_id: str | None = None, source_name: str = "",
         progress: Callable[[str], None] = print) -> Document:
     opts = options or Options()
@@ -85,6 +128,8 @@ def run(image_path: Path, options: Options | None = None, job_id: str | None = N
             progress(f"Kept {n_photo} text block(s) inside photos as part of the picture")
     # On a UI, cards / buttons / photos / icons are found by the elements stage instead
     found = [] if flat_ui else shapes.find(img, blocks)
+    if not flat_ui:  # tinted label bands behind text on photos ("Smoothing" on a navy tag)
+        found += shapes.find_tags(img, blocks, found)
     step("style")
     progress(f"Grouped into {len(blocks)} block(s), found {len(found)} button/shape(s)")
 
@@ -140,6 +185,16 @@ def run(image_path: Path, options: Options | None = None, job_id: str | None = N
         clean, photo_layers, photo_area = elements.lift_photos(img, clean, out, opts.scale)
         if photo_layers:
             progress(f"Separated {len(photo_layers)} photo / product image(s)")
+        # things placed on a photo backdrop (product cards, stickers): their own layers, backdrop intact
+        # (never inside a photo that is already its own layer: those are labels on its products)
+        skip = mask | (photos.tile_mask(img) * 255).astype(np.uint8) if photo_layers else mask
+        clean, object_layers, object_mask = elements.lift_objects(img, clean, out, opts.scale, skip=skip,
+                                                                  avoid=[sh.box for sh in found])
+        if object_layers:
+            photo_layers += object_layers
+            mask |= object_mask
+            progress(f"Separated {len(object_layers)} placed object(s) (cards, products, stickers)")
+            step("objects")
     else:
         photo_area = 0.0
     if opts.cutout_subject and looks_like_ui:
@@ -155,11 +210,14 @@ def run(image_path: Path, options: Options | None = None, job_id: str | None = N
             cut = None
         if cut is not None:
             rgba, subject_box = cut
+            n_print = _print_on_subject(img, rgba, subject_box, editable, blocks)
+            if n_print:
+                progress(f"Kept {n_print} label(s) printed on the product with the cut-out")
             Image.fromarray(rgba, "RGBA").save(out / "subject.png")
-            clean, _ = lama.inpaint(clean, segment.subject_mask(rgba, subject_box, H, W))
+            clean, _ = lama.inpaint(clean, segment.subject_mask(rgba, subject_box, H, W, img))
             progress("Cut out the main subject onto its own layer")
         else:
-            progress("No clear subject to cut out")
+            progress("No separate subject to cut out (the photo stays as the background)")
         step("cutout")
 
     Image.fromarray(clean).save(out / "background.png")

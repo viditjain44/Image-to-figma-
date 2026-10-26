@@ -105,11 +105,16 @@ The Figma frame also contains a hidden, locked **Original (reference)** layer: s
   shots, thumbnails, hero images) are found by their non-flat pixels, and text printed on them
   (packaging, labels) stays in the picture. Rating stars stay in the picture; the score and count
   beside them ("4.7", "(98)") become separate text layers.
+- **Ads on a photo backdrop** (hair, a room, a landscape): the photo stays the background and is never
+  cut out as a "subject" when it fills most of the frame. Things placed on it in flat colour (product
+  cards with their bottles, stickers) become their own image layers, and translucent label tags behind
+  a line of text become pills, so only their own footprint is inpainted. Pills or tags with an icon
+  on them stay in the picture; only their text is lifted.
 - **Known limits**: OCR misreads stay as typed (e.g. "₹" read as "E", a missing last letter); link
   underlines stay in the background; text-field placeholders become plain text layers; a headline
   overlaid on a photo inside a UI (e.g. a storefront hero in an admin preview) stays in the picture;
   in light-mode UIs, a product photo whose white background exactly matches the page may only be
-  partly detected.
+  partly detected; a translucent tag becomes a solid fill (slightly darker than the original).
 - **Without Ollama**: untick *AI labels*; roles come from size/position rules (packaging text may then
   be treated as editable if it is large).
 - Settings live in `src/img_to_figma/config.py`, overridable with `I2F_<NAME>` environment variables.

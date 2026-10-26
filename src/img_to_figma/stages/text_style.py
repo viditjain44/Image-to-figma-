@@ -53,19 +53,23 @@ def _colors(img: np.ndarray, box: Box) -> tuple[np.ndarray, np.ndarray, float]:
     dist = np.linalg.norm(inner - bg, axis=1)
     differs = dist > 30  # thin text can be < 15% of the box, so look only at pixels that differ at all
     if differs.sum() >= 40:
-        # Text is one flat colour; a photo behind it is not. Of two colour clusters, take the tighter one.
+        # Text is one flat colour standing out from what is behind it; a photo behind it is neither.
+        # Of two colour clusters, take the one that contrasts most with the background per unit of
+        # spread (the tighter one alone picks dark hair over thin white letters).
         px = inner[differs]
         _, labels, centers = cv2.kmeans(px, 2, None, (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0),
                                         3, cv2.KMEANS_PP_CENTERS)
         labels = labels.ravel()
-        best, best_spread = None, np.inf
+        best, best_score = None, -np.inf
         for k in range(2):
             members = px[labels == k]
-            if len(members) < 0.2 * len(px):
+            if len(members) < 0.12 * len(px):
                 continue
             spread = float(np.linalg.norm(members - centers[k], axis=1).mean())
-            if spread < best_spread:
-                best, best_spread = members, spread
+            contrast = float(np.linalg.norm(centers[k] - bg))
+            score = contrast / (spread + 10)
+            if score > best_score:
+                best, best_score = members, score
         far = best if best is not None else px
         d = np.linalg.norm(far - bg, axis=1)
         far = far[d >= np.percentile(d, 50)]  # the solid core of the glyphs, not their soft edges

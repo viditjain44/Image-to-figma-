@@ -89,7 +89,9 @@ def _near_photo_text(blocks: list[TextBlock]) -> None:
             if b.keep_in_background:
                 continue
             reach = b.font_size * 1.5
-            near = sum(abs(k.box.cx - b.box.cx) < (k.box.w + b.box.w) / 2 + reach
+            # stacked on the same pack (x ranges overlap, close above/below), not merely beside it:
+            # "TRY RISK FREE" next to a row of bottles is overlay copy
+            near = sum(min(k.box.x2, b.box.x2) > max(k.box.x, b.box.x)
                        and abs(k.box.cy - b.box.cy) < (k.box.h + b.box.h) / 2 + reach for k in kept)
             if near >= 2 or (near == 1 and b.font_size < median * 0.75):
                 b.keep_in_background = changed = True

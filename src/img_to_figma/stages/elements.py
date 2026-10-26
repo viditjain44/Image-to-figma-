@@ -348,3 +348,168 @@ def lift_photos(img: np.ndarray, clean: np.ndarray, out: Path, scale: float) -> 
         filled, _ = lama.inpaint(clean, unknown)
         background[unknown > 0] = filled[unknown > 0]
     return background, layers, float((erase > 0).mean())
+
+
+def _placed_cards(img: np.ndarray, skip: np.ndarray) -> list[tuple[np.ndarray, bool]]:
+    """Masks of flat-colour cards / stickers placed on a photo. A product standing on a card often
+    splits its fill into strips, so aligned strips of the same colour and height are joined and the
+    card is their convex hull."""
+    H, W = img.shape[:2]
+    a = img.astype(np.int16)
+    near = np.zeros((H, W), np.uint8)  # neighbours within 2 levels: flat paint with a slight gradient
+    near[:-1, :-1] = ((np.abs(a[:-1, 1:] - a[:-1, :-1]).max(axis=2) <= 2)
+                      & (np.abs(a[1:, :-1] - a[:-1, :-1]).max(axis=2) <= 2))
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(near, connectivity=4)
+    cands = []
+    for i in range(1, n):
+        x, y, w, h, area = stats[i]
+        if area < 0.0008 * H * W or w * h > 0.25 * H * W:
+            continue
+        left, top, right, bottom = x <= 2, y <= 2, x + w >= W - 2, y + h >= H - 2
+        # a ribbon may run off both sides (or top and bottom); anything else touching the frame is
+        # the layout background, not a placed object
+        ribbon = ((left or right) and not (top or bottom) and w >= 0.6 * W and h <= 0.2 * H) or \
+                 ((top or bottom) and not (left or right) and h >= 0.6 * H and w <= 0.2 * W)
+        if (left or top or right or bottom) and not ribbon:
+            continue
+        comp = labels == i
+        if (skip[comp] > 0).mean() > 0.75:
+            continue  # the glyphs of editable text (a label tag behind text is kept)
+        cands.append(dict(i=i, box=(x, y, w, h), area=area, colour=np.median(img[comp], axis=0), ribbon=ribbon))
+    # join aligned strips of one colour and height (the two sides of a card behind a bottle)
+    group = list(range(len(cands)))
+    find = lambda k: k if group[k] == k else find(group[k])
+    for p_, c1 in enumerate(cands):
+        for q, c2 in enumerate(cands[p_ + 1:], p_ + 1):
+            (x1, y1, w1, h1), (x2, y2, w2, h2) = c1["box"], c2["box"]
+            if np.abs(c1["colour"] - c2["colour"]).max() > 6:
+                continue
+            same_rows = abs(y1 - y2) <= 0.05 * max(h1, h2) and abs(h1 - h2) <= 0.1 * max(h1, h2)
+            same_cols = abs(x1 - x2) <= 0.05 * max(w1, w2) and abs(w1 - w2) <= 0.1 * max(w1, w2)
+            gap_x = max(x1, x2) - min(x1 + w1, x2 + w2)
+            gap_y = max(y1, y2) - min(y1 + h1, y2 + h2)
+            if (same_rows and gap_x < 0.8 * max(h1, h2)) or (same_cols and gap_y < 0.8 * max(w1, w2)):
+                group[find(q)] = find(p_)
+    cards = []
+    for root in {find(k) for k in range(len(cands))}:
+        members = [c for k, c in enumerate(cands) if find(k) == root]
+        pts = np.concatenate([np.argwhere(labels == c["i"])[:, ::-1] for c in members]).astype(np.int32)
+        hull = cv2.convexHull(pts)
+        card = np.zeros((H, W), np.uint8)
+        cv2.fillConvexPoly(card, hull, 1)
+        x, y, w, h = cv2.boundingRect(hull)
+        (_, _), (rw, rh), _ = cv2.minAreaRect(hull)  # tilted cards / ribbons: their own rotated box
+        flat_area = sum(c["area"] for c in members)
+        if (card.sum() < 0.006 * H * W or w * h > 0.25 * H * W or card.sum() < 0.8 * rw * rh
+                or flat_area < 0.2 * card.sum()):
+            continue  # too small, too big, not a (rounded, maybe tilted) rectangle, or mostly not this colour
+        # Placed on the photo: a little way out (past any soft drop shadow) the photo goes on. A white
+        # label printed on a bottle is surrounded by more flat paint (the bottle, a page, a smooth sky).
+        side = min(H, W)
+        far = _ring(card > 0, int(0.023 * side), int(0.037 * side))
+        is_ribbon = any(c["ribbon"] for c in members)
+        # (a band running from edge to edge is a design element by nature, not a label on a product)
+        if not is_ribbon and (not far.any() or (near[far] > 0).mean() > 0.4 or (skip[far] > 0).mean() > 0.5):
+            continue
+        cards.append((card, is_ribbon))
+    # one card found twice (from different strips): merge overlapping ones
+    merged: list[tuple[np.ndarray, bool]] = []
+    for card, ribbon in sorted(cards, key=lambda c: -int(c[0].sum())):
+        for m, _ in merged:
+            if (m & card).sum() >= 0.3 * min(m.sum(), card.sum()):
+                pts = np.argwhere((m | card) > 0)[:, ::-1].astype(np.int32)
+                m[:] = 0
+                cv2.fillConvexPoly(m, cv2.convexHull(pts), 1)
+                break
+        else:
+            merged.append((card.copy(), ribbon))
+    return merged
+
+
+def lift_objects(img: np.ndarray, clean: np.ndarray, out: Path, scale: float, skip: np.ndarray,
+                 avoid: list[Box] | None = None) -> tuple[np.ndarray, list[Layer], np.ndarray]:
+    """For ads on a photo backdrop: things a designer placed on top (product cards, stickers, badges)
+    are painted in flat colour, which a photo never is. Each becomes an image layer, together with
+    whatever sticks out of it (a pump head above a card, found by a local cut-out), and only its own
+    footprint is inpainted, so the backdrop photo stays intact.
+    `skip`: what is already lifted (editable text). Returns (background, layers, erased mask)."""
+    H, W = img.shape[:2]
+    avoid = avoid or []
+    layers: list[Layer] = []
+    lifted = np.zeros((H, W), np.uint8)
+    s = lambda v: round(v / scale)
+    side = min(H, W)
+    for card, ribbon in _placed_cards(img, skip):
+        x, y, w, h = cv2.boundingRect(card)
+        box = Box(x=int(x), y=int(y), w=int(w), h=int(h))
+        if any(min(box.x2, o.x2) > max(box.x, o.x) and min(box.y2, o.y2) > max(box.y, o.y) for o in avoid):
+            continue  # already a button layer
+        alpha = cv2.GaussianBlur(card * 255, (3, 3), 0)  # soft 1px edge like the original anti-aliasing
+        if not ribbon:  # a ribbon runs under products; a cut-out around it would grab them
+            alpha = np.maximum(alpha, _sticking_out(clean, card, side))
+        ys, xs = np.nonzero(alpha > 8)
+        bx = Box(x=int(xs.min()), y=int(ys.min()), w=int(xs.max() - xs.min() + 1), h=int(ys.max() - ys.min() + 1))
+        idx = len(layers) + 1
+        rgba = np.dstack([clean, alpha])[bx.y:bx.y2, bx.x:bx.x2]
+        Image.fromarray(rgba, "RGBA").save(out / f"object-{idx}.png")
+        layers.append(Layer(id=f"object-{idx}", name="Ribbon" if ribbon else f"Object {idx}", role="product",
+                            type="image", x=s(bx.x), y=s(bx.y), w=s(bx.w), h=s(bx.h), src=f"object-{idx}.png"))
+        lifted |= (alpha > 8).astype(np.uint8) * 255
+    if not layers:
+        return clean, [], lifted
+    # drop shadows around the objects go too, otherwise they stay behind as a dark halo
+    grow = max(7, int(0.02 * side)) | 1
+    erase = cv2.dilate(lifted, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grow, grow)))
+    background, _ = lama.inpaint(clean, erase)
+    return background, layers, erase
+
+
+def _sticking_out(img: np.ndarray, card: np.ndarray, side: int) -> np.ndarray:
+    """Alpha of the product that pokes out of a card (pump heads, triggers, caps), from a local
+    cut-out. A wide crop first (triggers can stick far out); if that one grabs something much bigger
+    than the card (a person, the backdrop), a tighter crop; empty if both do."""
+    for margin in (0.8, 0.4):
+        alpha = _local_cutout(img, card, margin)
+        if alpha is not None:
+            return alpha
+    return np.zeros(card.shape, np.uint8)
+
+
+def _local_cutout(img: np.ndarray, card: np.ndarray, margin: float) -> np.ndarray | None:
+    from rembg import remove
+
+    from .segment import _session
+
+    H, W = card.shape
+    ys, xs = np.nonzero(card)
+    x0, y0, x1, y1 = xs.min(), ys.min(), xs.max() + 1, ys.max() + 1
+    pad = int(margin * max(x1 - x0, y1 - y0))
+    cx0, cy0, cx1, cy1 = max(0, x0 - pad), max(0, y0 - pad), min(W, x1 + pad), min(H, y1 + pad)
+    out = np.zeros((H, W), np.uint8)
+    try:
+        crop_alpha = np.array(remove(Image.fromarray(img[cy0:cy1, cx0:cx1]), session=_session(),
+                                     only_mask=True, post_process_mask=True))
+    except Exception as e:
+        log.warning("Local cut-out failed: %s", e)
+        return out
+    solid = (crop_alpha > 127).astype(np.uint8)
+    n, labels = cv2.connectedComponents(solid)
+    card_crop = card[cy0:cy1, cx0:cx1] > 0
+    keep = np.zeros_like(solid, bool)
+    for i in range(1, n):
+        comp = labels == i
+        if (comp & card_crop).sum() >= 0.3 * comp.sum():  # mostly on the card: the product on it
+            keep |= comp
+    if keep.sum() > 2.5 * card_crop.sum():
+        return None  # grabbed something much bigger than the card
+    if (keep & card_crop).sum() < 0.5 * card_crop.sum():
+        return None  # focused on something else in the crop (a person): the product wasn't found
+    # thin parts (a spray trigger's tip) can come out as separate bits right next to the product
+    near = cv2.dilate(keep.astype(np.uint8), np.ones((15, 15), np.uint8)) > 0
+    for i in range(1, n):
+        comp = labels == i
+        if not (comp & keep).any() and (comp & near).any() and comp.sum() < 0.2 * keep.sum():
+            keep |= comp
+    keep = cv2.dilate(keep.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+    out[cy0:cy1, cx0:cx1] = np.where(keep, crop_alpha, 0)
+    return out
